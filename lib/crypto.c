@@ -69,6 +69,115 @@ error_from_pr (GError **error)
   g_free (err);
 }
 
+/*
+ * FIPS compliant implementation of PK11_ImportSymKey().
+ * Source: https://github.com/ceph/ceph/pull/27104/files
+ */
+static PK11SymKey *
+import_sym_key (PK11SlotInfo *slot, CK_MECHANISM_TYPE type, PK11Origin origin,
+                CK_ATTRIBUTE_TYPE operation, SECItem *key, void *wincx)
+{
+  CK_MECHANISM_TYPE wrap_mechanism = 0UL;
+  PK11SymKey *wrapping_key = NULL, *sym_key = NULL;
+  SECItem tmp_sec_item, wrapped_key_item, *raw_key_aligned = NULL;
+  PK11Context *wrap_key_crypt_context = NULL;
+  int block_size = 0;
+  size_t wrapped_key_size = 0;
+  unsigned char *wrapped_key = NULL;
+  int out_len = 0;
+  SECStatus ret = 0;
+
+  /* Fall back to PK11_ImportSymKey() if FIPS mode is disabled. */
+  if (PK11_IsFIPS () == PR_FALSE)
+    return PK11_ImportSymKey (slot, type, origin, operation, key, wincx);
+
+  /* Get the best mechanism for the wrapping operation. */
+  wrap_mechanism = PK11_GetBestWrapMechanism (slot);
+
+  /* Based on that mechanism, generate a symetric key <wrapping_key>. */
+  wrapping_key = PK11_KeyGen (slot, wrap_mechanism, NULL,
+                              PK11_GetBestKeyLength (slot, wrap_mechanism),
+                              NULL);
+  if (wrapping_key == NULL)
+    return NULL;
+
+  /* Create the context for the wrapping operation. The context contains:
+   *   - <wrapping_key>
+   *   - operation to perform (CKA_ENCRYPT)
+   */
+  memset (&tmp_sec_item, 0, sizeof (tmp_sec_item));
+  wrap_key_crypt_context = PK11_CreateContextBySymKey (wrap_mechanism,
+                                                       CKA_ENCRYPT,
+                                                       wrapping_key,
+                                                       &tmp_sec_item);
+  if (wrap_key_crypt_context == NULL) {
+    PK11_FreeSymKey (wrapping_key);
+    return NULL;
+  }
+
+  /* Align <key> to the block size specified by the wrapping mechanism. */
+  block_size = PK11_GetBlockSize (wrap_mechanism, NULL);
+  raw_key_aligned = PK11_BlockData (key, block_size);
+  if (raw_key_aligned == NULL) {
+    PK11_DestroyContext (wrap_key_crypt_context, PR_TRUE);
+    PK11_FreeSymKey (wrapping_key);
+    return NULL;
+  }
+
+  /* Prepare for <key> wrap. First, allocate enough space for
+   * the wrapped <key>. Add the padding of the size of one block behind the
+   * aligned <key> to make sure the wrapping operation will not hit the wall.
+   */
+  wrapped_key_size = raw_key_aligned->len + block_size;
+  wrapped_key = g_try_malloc0 (wrapped_key_size);
+  if (wrapped_key == NULL) {
+    SECITEM_FreeItem (raw_key_aligned, PR_TRUE);
+    PK11_DestroyContext (wrap_key_crypt_context, PR_TRUE);
+    PK11_FreeSymKey (wrapping_key);
+    return NULL;
+  }
+
+  /* Do the wrap operation. <wrapped_key> is now a pair (<wrapping_key>, <key>)
+   * expressing that raw key <key> is now encrypted with the <wrapping_key>.
+   */
+  ret = PK11_CipherOp (wrap_key_crypt_context, wrapped_key, &out_len,
+                       wrapped_key_size, raw_key_aligned->data,
+                       raw_key_aligned->len);
+  if (ret != SECSuccess) {
+    g_free (wrapped_key);
+    SECITEM_FreeItem (raw_key_aligned, PR_TRUE);
+    PK11_DestroyContext (wrap_key_crypt_context, PR_TRUE);
+    PK11_FreeSymKey (wrapping_key);
+    return NULL;
+  }
+
+  /* Finish the wrapping operation and release no more needed resources. */
+  ret = PK11_Finalize (wrap_key_crypt_context);
+  SECITEM_FreeItem (raw_key_aligned, PR_TRUE);
+  PK11_DestroyContext (wrap_key_crypt_context, PR_TRUE);
+  if (ret != SECSuccess) {
+    g_free (wrapped_key);
+    PK11_FreeSymKey (wrapping_key);
+    return NULL;
+  }
+
+  /* Prepare for unwrapping the <key>. */
+  memset (&tmp_sec_item, 0, sizeof (tmp_sec_item));
+  memset (&wrapped_key_item, 0, sizeof (wrapped_key_item));
+  wrapped_key_item.data = wrapped_key;
+  wrapped_key_item.len = wrapped_key_size;
+
+  /* Unwrap the <key>. First, decrypt the <key> with the <wrapping_key> to get
+   * its raw form. Then make a symmetric key (<key>, <type>, <operation>). This
+   * makes a symmetric key from the raw <key> in a FIPS compliant manner.
+   */
+  sym_key = PK11_UnwrapSymKey (wrapping_key, wrap_mechanism, &tmp_sec_item,
+                               &wrapped_key_item, type, operation, key->len);
+  g_free (wrapped_key);
+  PK11_FreeSymKey (wrapping_key);
+  return sym_key;
+}
+
  /* LIBVK_PACKET_FORMAT_ASYMMETRIC */
 
 /* Encrypt DATA of SIZE for CERT.
@@ -291,9 +400,9 @@ wrap_asymmetric (void **wrapped_secret, size_t *wrapped_secret_size,
      CKM_GENERIC_SECRET_KEY_GEN. */
   clear_secret_item.data = (void *)clear_secret_data;
   clear_secret_item.len = clear_secret_size;
-  secret_key = PK11_ImportSymKey (slot, CKM_GENERIC_SECRET_KEY_GEN,
-				  PK11_OriginUnwrap, CKA_WRAP,
-				  &clear_secret_item, pwfn_arg);
+  secret_key = import_sym_key (slot, CKM_GENERIC_SECRET_KEY_GEN,
+			       PK11_OriginUnwrap, CKA_WRAP,
+			       &clear_secret_item, pwfn_arg);
   PK11_FreeSlot (slot);
   if (secret_key == NULL)
     {
@@ -471,9 +580,9 @@ wrap_symmetric (void **wrapped_secret, size_t *wrapped_secret_size, void **iv,
   /* The disk encryption mechanism might not have a PKCS11 name, and we don't
      really need to tell NSS specifics anyway, so just use
      CKM_GENERIC_SECRET_KEY_GEN. */
-  secret_key = PK11_ImportSymKey (slot, CKM_GENERIC_SECRET_KEY_GEN,
-				  PK11_OriginUnwrap, CKA_WRAP,
-				  &clear_secret_item, pwfn_arg);
+  secret_key = import_sym_key (slot, CKM_GENERIC_SECRET_KEY_GEN,
+			       PK11_OriginUnwrap, CKA_WRAP,
+			       &clear_secret_item, pwfn_arg);
   PK11_FreeSlot (slot);
   if (secret_key == NULL)
     {
