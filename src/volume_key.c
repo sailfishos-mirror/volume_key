@@ -17,6 +17,7 @@ Author: Miloslav Trmač <mitr@redhat.com> */
 #include <config.h>
 
 #include <assert.h>
+#include <errno.h>
 #include <langinfo.h>
 #include <locale.h>
 #include <regex.h>
@@ -403,6 +404,7 @@ get_password (const char *prompt)
   char buf[LINE_MAX], *p;
   struct termios otermios;
   gboolean echo_disabled;
+  int saved_errno = 0;
 
   tty = fopen ("/dev/tty", "r+");
   if (tty != NULL)
@@ -430,7 +432,8 @@ get_password (const char *prompt)
       echo_disabled = tcsetattr (fileno (in_file), TCSAFLUSH, &ntermios) == 0;
     }
 
-  p = fgets(buf, sizeof(buf), in_file);
+  p = fgets (buf, sizeof (buf), in_file);
+  saved_errno = errno;
 
   if (echo_disabled)
     {
@@ -441,13 +444,15 @@ get_password (const char *prompt)
   if (tty != NULL)
     fclose (tty);
 
-  if (p == NULL)
+  if (p == NULL) {
+    fprintf (stderr, "fgets: %s\n", strerror (saved_errno));
     return NULL;
+  }
 
-  p = strchr(buf, '\r');
+  p = strchr (buf, '\r');
   if (p != NULL)
     *p = '\0';
-  p = strchr(buf, '\n');
+  p = strchr (buf, '\n');
   if (p != NULL)
     *p = '\0';
 
