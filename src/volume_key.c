@@ -388,7 +388,7 @@ read_batch_string (void)
       free (buf);
       return NULL;
     }
-  res = g_memdup (buf, len);
+  res = g_memdup2 (buf, len);
   free (buf);
   return res;
 }
@@ -531,7 +531,7 @@ generic_ui_cb (void *id, const char *prompt, int echo)
 	  free (buf);
 	  return NULL;
 	}
-      res = g_memdup (buf, len + 1);
+      res = g_memdup2 (buf, len + 1);
       free (buf);
       return res;
     }

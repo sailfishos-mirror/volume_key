@@ -98,7 +98,7 @@ kmip_key_value_set_bytes (struct kmip_key_value *value, const void *bytes,
 {
   kmip_key_value_free_v (value);
   value->type = KMIP_KEY_VALUE_BYTES;
-  value->v.bytes.data = g_memdup (bytes, len);
+  value->v.bytes.data = g_memdup2 (bytes, len);
   value->v.bytes.len = len;
 }
 
@@ -110,7 +110,7 @@ kmip_key_value_set_symmetric_key (struct kmip_key_value *value, const void *key,
   kmip_key_value_free_v (value);
   value->type = KMIP_KEY_VALUE_SYMMETRIC_KEY;
   value->v.key = g_new (struct kmip_symmetric_key, 1);
-  value->v.key->data = g_memdup (key, len);
+  value->v.key->data = g_memdup2 (key, len);
   value->v.key->len = len;
 }
 
@@ -920,7 +920,7 @@ get_bytes (struct kmip_decoding_state *kmip, void **bytes, size_t *size,
 		   _("Unexpected end of data"));
       return -1;
     }
-  *bytes = g_memdup (kmip->data, s);
+  *bytes = g_memdup2 (kmip->data, s);
   *size = s;
   kmip->data += s;
   kmip->left -= s;
@@ -1884,7 +1884,7 @@ kmip_libvk_packet_wrap_secret_symmetric (struct kmip_libvk_packet *packet,
   key_block->wrapping = g_new (struct kmip_key_wrapping_data, 1);
   key_block->wrapping->method = KMIP_WRAPPING_LIBVK_ENCRYPT_KEY_ONLY;
   key_block->wrapping->encryption_key = encryption_key;
-  key_block->wrapping->iv = g_memdup (iv, iv_len);
+  key_block->wrapping->iv = g_memdup2 (iv, iv_len);
   key_block->wrapping->iv_len = iv_len;
 
   g_free (iv);

@@ -154,7 +154,7 @@ luks_replace_key (struct libvk_volume *vol, const void *key)
       memset (luks->key, 0, luks->key_bytes);
       g_free (luks->key);
     }
-  luks->key = g_memdup (key, luks->key_bytes);
+  luks->key = g_memdup2 (key, luks->key_bytes);
 }
 
 /* Replace the passphrase in VOL, if any, by PASSPHRASE */
@@ -791,7 +791,7 @@ luks_parse_escrow_packet (struct libvk_volume *vol,
 			   _("Key length mismatch"));
 	      goto err;
 	    }
-	  vol->v.luks->key = g_memdup (key_value->v.key->data,
+	  vol->v.luks->key = g_memdup2 (key_value->v.key->data,
 				       key_value->v.key->len);
 	}
       break;

@@ -298,7 +298,7 @@ encrypt_asymmetric (size_t *res_size, const void *data, size_t size,
     }
 
   *res_size = dest_item.len;
-  res = g_memdup (dest_item.data, dest_item.len);
+  res = g_memdup2 (dest_item.data, dest_item.len);
   PORT_FreeArena (res_arena, PR_FALSE);
   NSS_CMSMessage_Destroy (cmsg);
   return res;
@@ -343,7 +343,7 @@ decrypt_asymmetric (size_t *res_size, const void *data, size_t size,
       error_from_pr (error);
       goto err_cmsg;
     }
-  res = g_memdup (dest->data, dest->len);
+  res = g_memdup2 (dest->data, dest->len);
   *res_size = dest->len;
 
   NSS_CMSMessage_Destroy (cmsg);
@@ -449,13 +449,13 @@ wrap_asymmetric (void **wrapped_secret, size_t *wrapped_secret_size,
   SECKEY_DestroyPublicKey (public_key);
   PK11_FreeSymKey (secret_key);
 
-  *wrapped_secret = g_memdup (wrapped_secret_item.data,
+  *wrapped_secret = g_memdup2 (wrapped_secret_item.data,
 			      wrapped_secret_item.len);
   *wrapped_secret_size = wrapped_secret_item.len;
   SECITEM_FreeItem (&wrapped_secret_item, PR_FALSE);
-  *issuer = g_memdup (isn->derIssuer.data, isn->derIssuer.len);
+  *issuer = g_memdup2 (isn->derIssuer.data, isn->derIssuer.len);
   *issuer_size = isn->derIssuer.len;
-  *sn = g_memdup (isn->serialNumber.data, isn->serialNumber.len);
+  *sn = g_memdup2 (isn->serialNumber.data, isn->serialNumber.len);
   *sn_size = isn->serialNumber.len;
   PORT_FreeArena (isn_arena, PR_FALSE);
   return 0;
@@ -538,7 +538,7 @@ unwrap_asymmetric (size_t *clear_secret_size, const void *wrapped_secret_data,
       goto err_secret_key;
     }
   clear_secret_item = PK11_GetKeyData (secret_key);
-  ret = g_memdup (clear_secret_item->data, clear_secret_item->len);
+  ret = g_memdup2 (clear_secret_item->data, clear_secret_item->len);
   *clear_secret_size = clear_secret_item->len;
   PK11_FreeSymKey (secret_key);
 
@@ -612,11 +612,11 @@ wrap_symmetric (void **wrapped_secret, size_t *wrapped_secret_size, void **iv,
   PK11_FreeSymKey (secret_key);
 
   iv_data = PK11_IVFromParam (mechanism, wrapping_param, &iv_data_size);
-  *iv = g_memdup (iv_data, iv_data_size);
+  *iv = g_memdup2 (iv_data, iv_data_size);
   *iv_size = iv_data_size;
   SECITEM_FreeItem (wrapping_param, PR_TRUE);
 
-  *wrapped_secret = g_memdup (wrapped_secret_item.data,
+  *wrapped_secret = g_memdup2 (wrapped_secret_item.data,
 			      wrapped_secret_item.len);
   *wrapped_secret_size = wrapped_secret_item.len;
   SECITEM_FreeItem (&wrapped_secret_item, PR_FALSE);
@@ -671,7 +671,7 @@ unwrap_symmetric (size_t *clear_secret_size, PK11SymKey *wrapping_key,
       goto err_secret_key;
     }
   clear_secret_item = PK11_GetKeyData (secret_key);
-  ret = g_memdup (clear_secret_item->data, clear_secret_item->len);
+  ret = g_memdup2 (clear_secret_item->data, clear_secret_item->len);
   *clear_secret_size = clear_secret_item->len;
   PK11_FreeSymKey (secret_key);
 
@@ -827,7 +827,7 @@ encrypt_with_passphrase (size_t *res_size, const void *data, size_t size,
 		   _("Unknown error getting encryption result"));
       goto err_ctx;
     }
-  res = g_memdup (gpgme_res, *res_size);
+  res = g_memdup2 (gpgme_res, *res_size);
   gpgme_free (gpgme_res);
 
   gpgme_release (ctx);
@@ -883,7 +883,7 @@ decrypt_with_passphrase (size_t *res_size, const void *data, size_t size,
 		   _("Unknown error getting decryption result"));
       goto err_ctx;
     }
-  res = g_memdup (gpgme_res, *res_size);
+  res = g_memdup2 (gpgme_res, *res_size);
   gpgme_free (gpgme_res);
 
   gpgme_release (ctx);
