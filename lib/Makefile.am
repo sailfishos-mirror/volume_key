@@ -33,6 +33,12 @@ libvolume_key_la_SOURCES = SECerrs.h SSLerrs.h \
 	ui.c ui.h \
 	volume.c volume.h \
 	volume_luks.c volume_luks.h
+if WITH_SQ
+libvolume_key_la_SOURCES += crypto-sq.c crypto-sq.h
+else
+libvolume_key_la_SOURCES += crypto-gpgme.c crypto-gpgme.h
+endif
+
 libvolume_key_la_CPPFLAGS = $(AM_CPPFLAGS) $(LOCALEDIR_CPPFLAGS)
 libvolume_key_la_LDFLAGS = -version-info $(VERSION_INFO)
 libvolume_key_la_LIBADD = $(blkid_LIBS) $(glib_LIBS) $(GPGME_LIBS) \
