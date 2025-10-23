@@ -83,7 +83,7 @@ volume_create_data_encryption_key_packet (struct kmip_key_value **kv,
   key_value = g_new (struct kmip_key_value, 1);
   key_value->type = KMIP_KEY_VALUE_SYMMETRIC_KEY;
   key_value->v.key = g_new (struct kmip_symmetric_key, 1);
-  key_value->v.key->data = g_memdup (key, key_bytes);
+  key_value->v.key->data = g_memdup2 (key, key_bytes);
   key_value->v.key->len = key_bytes;
   key_value->attributes = g_ptr_array_new ();
   add_common_volume_attributes (key_value, vol);
@@ -129,7 +129,7 @@ volume_create_passphrase_packet (struct kmip_key_value **kv,
 
   key_value = g_new (struct kmip_key_value, 1);
   key_value->type = KMIP_KEY_VALUE_BYTES;
-  key_value->v.bytes.data = g_memdup (passphrase, size);
+  key_value->v.bytes.data = g_memdup2 (passphrase, size);
   key_value->v.bytes.len = size;
   key_value->attributes = g_ptr_array_new ();
   add_common_volume_attributes (key_value, vol);

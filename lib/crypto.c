@@ -26,7 +26,6 @@ Author: Miloslav Trmač <mitr@redhat.com> */
 #include <cms.h>
 #include <glib.h>
 #include <glib/gi18n-lib.h>
-#include <gpgme.h>
 #include <keyhi.h>
 #include <nss.h>
 #include <pk11pub.h>
@@ -34,6 +33,11 @@ Author: Miloslav Trmač <mitr@redhat.com> */
 #include <prinit.h>
 #include <smime.h>
 
+#if WITH_SQ
+# include "crypto-sq.h"
+#else
+# include "crypto-gpgme.h"
+#endif
 #include "crypto.h"
 #include "nss_error.h"
 #include "libvolume_key.h"
@@ -298,7 +302,7 @@ encrypt_asymmetric (size_t *res_size, const void *data, size_t size,
     }
 
   *res_size = dest_item.len;
-  res = g_memdup (dest_item.data, dest_item.len);
+  res = g_memdup2 (dest_item.data, dest_item.len);
   PORT_FreeArena (res_arena, PR_FALSE);
   NSS_CMSMessage_Destroy (cmsg);
   return res;
@@ -343,7 +347,7 @@ decrypt_asymmetric (size_t *res_size, const void *data, size_t size,
       error_from_pr (error);
       goto err_cmsg;
     }
-  res = g_memdup (dest->data, dest->len);
+  res = g_memdup2 (dest->data, dest->len);
   *res_size = dest->len;
 
   NSS_CMSMessage_Destroy (cmsg);
@@ -449,13 +453,13 @@ wrap_asymmetric (void **wrapped_secret, size_t *wrapped_secret_size,
   SECKEY_DestroyPublicKey (public_key);
   PK11_FreeSymKey (secret_key);
 
-  *wrapped_secret = g_memdup (wrapped_secret_item.data,
+  *wrapped_secret = g_memdup2 (wrapped_secret_item.data,
 			      wrapped_secret_item.len);
   *wrapped_secret_size = wrapped_secret_item.len;
   SECITEM_FreeItem (&wrapped_secret_item, PR_FALSE);
-  *issuer = g_memdup (isn->derIssuer.data, isn->derIssuer.len);
+  *issuer = g_memdup2 (isn->derIssuer.data, isn->derIssuer.len);
   *issuer_size = isn->derIssuer.len;
-  *sn = g_memdup (isn->serialNumber.data, isn->serialNumber.len);
+  *sn = g_memdup2 (isn->serialNumber.data, isn->serialNumber.len);
   *sn_size = isn->serialNumber.len;
   PORT_FreeArena (isn_arena, PR_FALSE);
   return 0;
@@ -538,7 +542,7 @@ unwrap_asymmetric (size_t *clear_secret_size, const void *wrapped_secret_data,
       goto err_secret_key;
     }
   clear_secret_item = PK11_GetKeyData (secret_key);
-  ret = g_memdup (clear_secret_item->data, clear_secret_item->len);
+  ret = g_memdup2 (clear_secret_item->data, clear_secret_item->len);
   *clear_secret_size = clear_secret_item->len;
   PK11_FreeSymKey (secret_key);
 
@@ -612,11 +616,11 @@ wrap_symmetric (void **wrapped_secret, size_t *wrapped_secret_size, void **iv,
   PK11_FreeSymKey (secret_key);
 
   iv_data = PK11_IVFromParam (mechanism, wrapping_param, &iv_data_size);
-  *iv = g_memdup (iv_data, iv_data_size);
+  *iv = g_memdup2 (iv_data, iv_data_size);
   *iv_size = iv_data_size;
   SECITEM_FreeItem (wrapping_param, PR_TRUE);
 
-  *wrapped_secret = g_memdup (wrapped_secret_item.data,
+  *wrapped_secret = g_memdup2 (wrapped_secret_item.data,
 			      wrapped_secret_item.len);
   *wrapped_secret_size = wrapped_secret_item.len;
   SECITEM_FreeItem (&wrapped_secret_item, PR_FALSE);
@@ -671,7 +675,7 @@ unwrap_symmetric (size_t *clear_secret_size, PK11SymKey *wrapping_key,
       goto err_secret_key;
     }
   clear_secret_item = PK11_GetKeyData (secret_key);
-  ret = g_memdup (clear_secret_item->data, clear_secret_item->len);
+  ret = g_memdup2 (clear_secret_item->data, clear_secret_item->len);
   *clear_secret_size = clear_secret_item->len;
   PK11_FreeSymKey (secret_key);
 
@@ -679,222 +683,6 @@ unwrap_symmetric (size_t *clear_secret_size, PK11SymKey *wrapping_key,
 
  err_secret_key:
   PK11_FreeSymKey (secret_key);
- err:
-  return NULL;
-}
-
- /* libgpgme utils */
-
-static void
-error_from_gpgme (GError **error, gpgme_error_t e)
-{
-  size_t len;
-  char *s;
-
-  s = NULL;
-  len = 100;
-  for (;;)
-    {
-      s = g_realloc (s, len);
-      if (gpgme_strerror_r (e, s, len) == 0)
-	break;
-      len *= 2;
-    }
-  g_set_error (error, LIBVK_ERROR, LIBVK_ERROR_CRYPTO, _("%s: %s"),
-	       gpgme_strsource (e), s);
-  g_free (s);
-}
-
-static gpgme_error_t
-gpgme_passphrase_cb (void *hook, const char *uid_hint,
-		     const char *passphrase_info, int prev_was_bad, int fd)
-{
-  static const char nl = '\n';
-
-  const char *pw;
-  size_t len;
-  ssize_t res;
-
-  (void)uid_hint;
-  (void)passphrase_info;
-  if (prev_was_bad != 0)
-    return GPG_ERR_CANCELED;
-  pw = hook;
-  len = strlen (pw);
-  while (len != 0)
-    {
-      res = write (fd, pw, len);
-      if (res < 0)
-	return gpgme_error_from_errno (errno);
-      pw += res;
-      len -= res;
-    }
-  if (write (fd, &nl, sizeof (nl)) < 0)
-    return gpgme_error_from_errno (errno);
-  return 0;
-}
-
-/* Create and configure a gpgme context, to use PASSPHRASE.
-   Return 0 if OK, -1 on error. */
-static int
-init_gpgme (gpgme_ctx_t *res, const char *passphrase, GError **error)
-{
-  gpgme_ctx_t ctx;
-  gpgme_error_t e;
-
-  (void)gpgme_check_version (NULL);
-  e = gpgme_new (&ctx);
-  if (e != GPG_ERR_NO_ERROR)
-    {
-      error_from_gpgme (error, e);
-      goto err;
-    }
-  e = gpgme_set_locale (ctx, LC_CTYPE, setlocale (LC_CTYPE, NULL));
-  if (e != GPG_ERR_NO_ERROR)
-    {
-      error_from_gpgme (error, e);
-      goto err_ctx;
-    }
-  e = gpgme_set_locale (ctx, LC_MESSAGES, setlocale (LC_MESSAGES, NULL));
-  if (e != GPG_ERR_NO_ERROR)
-    {
-      error_from_gpgme (error, e);
-      goto err_ctx;
-    }
-  e = gpgme_set_protocol (ctx, GPGME_PROTOCOL_OpenPGP);
-  if (e != GPG_ERR_NO_ERROR)
-    {
-      error_from_gpgme (error, e);
-      goto err_ctx;
-    }
-  e = gpgme_ctx_set_engine_info (ctx, GPGME_PROTOCOL_OpenPGP, GPG_PATH, NULL);
-  if (e != GPG_ERR_NO_ERROR)
-    {
-      error_from_gpgme (error, e);
-      goto err_ctx;
-    }
-  gpgme_set_pinentry_mode (ctx, GPGME_PINENTRY_MODE_LOOPBACK);
-  gpgme_set_passphrase_cb (ctx, gpgme_passphrase_cb, (void *)passphrase);
-  *res = ctx;
-  return 0;
-
- err_ctx:
-  gpgme_release (ctx);
- err:
-  return -1;
-}
-
- /* LIBVK_PACKET_FORMAT_PASSPHRASE */
-
-/* Encrypt DATA of SIZE using PASSPHRASE.
-   Return encrypted data (for g_free()), setting RES_SIZE to the size of the
-   result, on success, NULL otherwise. */
-void *
-encrypt_with_passphrase (size_t *res_size, const void *data, size_t size,
-			 const char *passphrase, GError **error)
-{
-  gpgme_ctx_t ctx;
-  gpgme_error_t e;
-  gpgme_data_t src_data, dest_data;
-  void *gpgme_res, *res;
-
-  // FIXME: this should eventually use CMS
-  if (init_gpgme (&ctx, passphrase, error) != 0)
-      goto err;
-  e = gpgme_data_new_from_mem (&src_data, data, size, 0);
-  if (e != GPG_ERR_NO_ERROR)
-    {
-      error_from_gpgme (error, e);
-      goto err_ctx;
-    }
-  e = gpgme_data_new (&dest_data);
-  if (e != GPG_ERR_NO_ERROR)
-    {
-      error_from_gpgme (error, e);
-      goto err_src_data;
-    }
-  e = gpgme_op_encrypt (ctx, NULL, 0, src_data, dest_data);
-  if (e != GPG_ERR_NO_ERROR)
-    {
-      error_from_gpgme (error, e);
-      goto err_dest_data;
-    }
-  gpgme_data_release (src_data);
-  gpgme_res = gpgme_data_release_and_get_mem (dest_data, res_size);
-  if (gpgme_res == NULL)
-    {
-      g_set_error (error, LIBVK_ERROR, LIBVK_ERROR_CRYPTO,
-		   _("Unknown error getting encryption result"));
-      goto err_ctx;
-    }
-  res = g_memdup (gpgme_res, *res_size);
-  gpgme_free (gpgme_res);
-
-  gpgme_release (ctx);
-  return res;
-
- err_dest_data:
-  gpgme_data_release (src_data);
- err_src_data:
-  gpgme_data_release (dest_data);
- err_ctx:
-  gpgme_release (ctx);
- err:
-  return NULL;
-}
-
-/* Decrypt DATA of SIZE using PASSPHRASE.
-   Return decrypted data (for g_free()), setting RES_SIZE to the size of the
-   result, on success, NULL otherwise. */
-void *
-decrypt_with_passphrase (size_t *res_size, const void *data, size_t size,
-			 const char *passphrase, GError **error)
-{
-  gpgme_ctx_t ctx;
-  gpgme_error_t e;
-  gpgme_data_t src_data, dest_data;
-  void *gpgme_res, *res;
-
-  if (init_gpgme (&ctx, passphrase, error) != 0)
-      goto err;
-  e = gpgme_data_new_from_mem (&src_data, data, size, 0);
-  if (e != GPG_ERR_NO_ERROR)
-    {
-      error_from_gpgme (error, e);
-      goto err_ctx;
-    }
-  e = gpgme_data_new (&dest_data);
-  if (e != GPG_ERR_NO_ERROR)
-    {
-      error_from_gpgme (error, e);
-      goto err_src_data;
-    }
-  e = gpgme_op_decrypt (ctx, src_data, dest_data);
-  if (e != GPG_ERR_NO_ERROR)
-    {
-      error_from_gpgme (error, e);
-      goto err_dest_data;
-    }
-  gpgme_data_release (src_data);
-  gpgme_res = gpgme_data_release_and_get_mem (dest_data, res_size);
-  if (gpgme_res == NULL)
-    {
-      g_set_error (error, LIBVK_ERROR, LIBVK_ERROR_CRYPTO,
-		   _("Unknown error getting decryption result"));
-      goto err_ctx;
-    }
-  res = g_memdup (gpgme_res, *res_size);
-  gpgme_free (gpgme_res);
-
-  gpgme_release (ctx);
-  return res;
-
- err_dest_data:
-  gpgme_data_release (src_data);
- err_src_data:
-  gpgme_data_release (dest_data);
- err_ctx:
-  gpgme_release (ctx);
  err:
   return NULL;
 }

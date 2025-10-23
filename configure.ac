@@ -195,7 +195,13 @@ AC_DEFINE(G_DISABLE_DEPRECATED, 1,
 PKG_CHECK_MODULES(libcryptsetup, [libcryptsetup])
 PKG_CHECK_MODULES(nss, [nss])
 
-AM_PATH_GPGME
+AM_CHECK_SQ([external])
+AM_CONDITIONAL([WITH_SQ], [test x$SQ_PATH != x])
+
+# Check for GPGME only if --with-sq was not specified
+AS_IF([test "x$SQ_PATH" = "x"],
+      [AM_PATH_GPGME],
+      [AC_MSG_NOTICE([Skipping GPGME check, using sq instead])])
 
 AM_GNU_GETTEXT([external])
 AM_GNU_GETTEXT_VERSION([0.18.2])
