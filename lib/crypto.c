@@ -183,6 +183,150 @@ import_sym_key (PK11SlotInfo *slot, CK_MECHANISM_TYPE type, PK11Origin origin,
 }
 
  /* LIBVK_PACKET_FORMAT_ASYMMETRIC */
+/*
+ * FIPS compliant implementation of PK11_ExtractKeyValue() + PK11_GetKeyData().
+ * Instead of directly extracting the key value (which is not allowed in FIPS mode),
+ * we wrap the symmetric key with a temporary wrapping key, then decrypt the
+ * wrapped data to get the raw key bytes.
+ * Returns a newly allocated SECItem with the key data on success, NULL on failure.
+ * The caller must free the result with SECITEM_FreeItem(result, PR_TRUE).
+ */
+static SECItem *
+extract_sym_key (PK11SymKey *sym_key)
+{
+  CK_MECHANISM_TYPE wrap_mechanism = 0UL;
+  PK11SlotInfo *slot = NULL;
+  PK11SymKey *wrapping_key = NULL;
+  SECItem tmp_sec_item, wrapped_key_item;
+  PK11Context *wrap_key_crypt_context = NULL;
+  int block_size = 0;
+  size_t wrapped_key_size = 0;
+  unsigned char *wrapped_key = NULL;
+  SECItem *clear_key = NULL;
+  int out_len = 0;
+  unsigned int final_len = 0;
+  SECStatus ret = 0;
+  int key_len = 0;
+
+  /* Fall back to PK11_ExtractKeyValue() + PK11_GetKeyData() if FIPS mode is disabled. */
+  if (PK11_IsFIPS () == PR_FALSE)
+    {
+      SECItem *key_data;
+
+      if (PK11_ExtractKeyValue (sym_key) != SECSuccess)
+        return NULL;
+      key_data = PK11_GetKeyData (sym_key);
+      if (key_data == NULL)
+        return NULL;
+      return SECITEM_DupItem (key_data);
+    }
+
+  slot = PK11_GetSlotFromKey (sym_key);
+  if (slot == NULL)
+    return NULL;
+
+  /* Get the best mechanism for the wrapping operation. */
+  wrap_mechanism = PK11_GetBestWrapMechanism (slot);
+
+  /* Generate a symmetric wrapping key. */
+  wrapping_key = PK11_KeyGen (slot, wrap_mechanism, NULL,
+                              PK11_GetBestKeyLength (slot, wrap_mechanism),
+                              NULL);
+  PK11_FreeSlot (slot);
+  if (wrapping_key == NULL)
+    return NULL;
+
+  /* Get block size and key length. */
+  block_size = PK11_GetBlockSize (wrap_mechanism, NULL);
+  if (block_size == 0)
+    block_size = 1;
+  key_len = PK11_GetKeyLength (sym_key);
+  if (key_len <= 0)
+    {
+      PK11_FreeSymKey (wrapping_key);
+      return NULL;
+    }
+
+  /* Allocate space for the wrapped key.
+   * Add extra space for padding (up to one block size).
+   */
+  wrapped_key_size = key_len + block_size;
+  wrapped_key = g_try_malloc0 (wrapped_key_size);
+  if (wrapped_key == NULL)
+    {
+      PK11_FreeSymKey (wrapping_key);
+      return NULL;
+    }
+
+  memset (&tmp_sec_item, 0, sizeof (tmp_sec_item));
+  memset (&wrapped_key_item, 0, sizeof (wrapped_key_item));
+  wrapped_key_item.data = wrapped_key;
+  wrapped_key_item.len = wrapped_key_size;
+
+  /* Wrap the symmetric key using the wrapping key. */
+  ret = PK11_WrapSymKey (wrap_mechanism, &tmp_sec_item, wrapping_key, sym_key,
+                         &wrapped_key_item);
+  if (ret != SECSuccess)
+    {
+      g_free (wrapped_key);
+      PK11_FreeSymKey (wrapping_key);
+      return NULL;
+    }
+
+  /* Now decrypt the wrapped key to get the raw bytes.
+   * Create a decryption context with the wrapping key.
+   */
+  wrap_key_crypt_context = PK11_CreateContextBySymKey (wrap_mechanism,
+                                                       CKA_DECRYPT,
+                                                       wrapping_key,
+                                                       &tmp_sec_item);
+  if (wrap_key_crypt_context == NULL)
+    {
+      g_free (wrapped_key);
+      PK11_FreeSymKey (wrapping_key);
+      return NULL;
+    }
+
+  /* Allocate space for the decrypted (clear) key. */
+  clear_key = SECITEM_AllocItem (NULL, NULL, wrapped_key_item.len);
+  if (clear_key == NULL)
+    {
+      g_free (wrapped_key);
+      PK11_DestroyContext (wrap_key_crypt_context, PR_TRUE);
+      PK11_FreeSymKey (wrapping_key);
+      return NULL;
+    }
+
+  /* Decrypt to get the raw key bytes. */
+  ret = PK11_CipherOp (wrap_key_crypt_context, clear_key->data, &out_len,
+                       clear_key->len, wrapped_key_item.data,
+                       wrapped_key_item.len);
+  if (ret != SECSuccess)
+    {
+      SECITEM_FreeItem (clear_key, PR_TRUE);
+      g_free (wrapped_key);
+      PK11_DestroyContext (wrap_key_crypt_context, PR_TRUE);
+      PK11_FreeSymKey (wrapping_key);
+      return NULL;
+    }
+
+  ret = PK11_DigestFinal (wrap_key_crypt_context, clear_key->data + out_len,
+                          &final_len, clear_key->len - out_len);
+  g_free (wrapped_key);
+  PK11_DestroyContext (wrap_key_crypt_context, PR_TRUE);
+  PK11_FreeSymKey (wrapping_key);
+  if (ret != SECSuccess)
+    {
+      SECITEM_FreeItem (clear_key, PR_TRUE);
+      return NULL;
+    }
+
+  /* Adjust the length to the actual key length (remove padding). */
+  clear_key->len = key_len;
+
+  return clear_key;
+}
+
 
 /* Encrypt DATA of SIZE for CERT.
    Return encrypted data (for g_free()), setting RES_SIZE to the size of the
@@ -536,20 +680,19 @@ unwrap_asymmetric (size_t *clear_secret_size, const void *wrapped_secret_data,
       error_from_pr (error);
       goto err;
     }
-  if (PK11_ExtractKeyValue (secret_key) != SECSuccess)
+  clear_secret_item = extract_sym_key (secret_key);
+  PK11_FreeSymKey (secret_key);
+  if (clear_secret_item == NULL)
     {
       error_from_pr (error);
-      goto err_secret_key;
+      goto err;
     }
-  clear_secret_item = PK11_GetKeyData (secret_key);
   ret = g_memdup2 (clear_secret_item->data, clear_secret_item->len);
   *clear_secret_size = clear_secret_item->len;
-  PK11_FreeSymKey (secret_key);
+  SECITEM_FreeItem (clear_secret_item, PR_TRUE);
 
   return ret;
 
- err_secret_key:
-  PK11_FreeSymKey (secret_key);
  err:
   return NULL;
 }
@@ -669,20 +812,19 @@ unwrap_symmetric (size_t *clear_secret_size, PK11SymKey *wrapping_key,
       error_from_pr (error);
       goto err;
     }
-  if (PK11_ExtractKeyValue (secret_key) != SECSuccess)
+  clear_secret_item = extract_sym_key (secret_key);
+  PK11_FreeSymKey (secret_key);
+  if (clear_secret_item == NULL)
     {
       error_from_pr (error);
-      goto err_secret_key;
+      goto err;
     }
-  clear_secret_item = PK11_GetKeyData (secret_key);
   ret = g_memdup2 (clear_secret_item->data, clear_secret_item->len);
   *clear_secret_size = clear_secret_item->len;
-  PK11_FreeSymKey (secret_key);
+  SECITEM_FreeItem (clear_secret_item, PR_TRUE);
 
   return ret;
 
- err_secret_key:
-  PK11_FreeSymKey (secret_key);
  err:
   return NULL;
 }
