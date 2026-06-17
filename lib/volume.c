@@ -281,7 +281,7 @@ libvk_volume_free (struct libvk_volume *vol)
 {
   g_return_if_fail (vol != NULL);
 
-  if (strcmp (vol->format, LIBVK_VOLUME_FORMAT_LUKS) == 0
+  if (vol->format != NULL && strcmp (vol->format, LIBVK_VOLUME_FORMAT_LUKS) == 0
       && vol->v.luks != NULL)
     luks_volume_free (vol->v.luks);
   g_free (vol->hostname);
